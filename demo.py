@@ -36,13 +36,9 @@ from utils.imutils import crop
 from utils.renderer import Renderer
 import config
 import constants
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--checkpoint', required=True, help='Path to pretrained checkpoint')
-parser.add_argument('--img', type=str, required=True, help='Path to input image')
-parser.add_argument('--bbox', type=str, default=None, help='Path to .json file containing bounding box coordinates')
-parser.add_argument('--openpose', type=str, default=None, help='Path to .json containing openpose detections')
-parser.add_argument('--outfile', type=str, default=None, help='Filename of output images. If not set use input filename.')
 
 def bbox_from_openpose(openpose_file, rescale=1.2, detection_thresh=0.2):
     """Get center and scale for bounding box from openpose detections."""
@@ -77,27 +73,75 @@ def process_image(img_file, bbox_file, openpose_file, input_res=224):
     If no bounding box is specified but openpose detections are available, use them to get the bounding box.
     """
     normalize_img = Normalize(mean=constants.IMG_NORM_MEAN, std=constants.IMG_NORM_STD)
-    img = cv2.imread(img_file)[:,:,::-1].copy() # PyTorch does not support negative stride at the moment
+    ori_img = cv2.imread(img_file)
+    img = ori_img[:,:,::-1].copy() # PyTorch does not support negative stride at the moment
     if bbox_file is None and openpose_file is None:
         # Assume that the person is centerered in the image
         height = img.shape[0]
         width = img.shape[1]
-        center = np.array([width // 2, height // 2])
-        scale = max(height, width) / 200
+        new_size = max(width, height)
+        # center = np.array([width // 2, height // 2])
+        # scale = max(height, width) / 200
+        # # print('height: ', height, 'width: ', width, 'center: ', center, 'scale: ', scale)
+        new_img = np.ones((new_size, new_size, 3), dtype=np.uint8)
+        xmin = (new_size - width) // 2
+        ymin = (new_size - height) // 2
+        new_img[ymin:ymin+height, xmin:xmin+width] = img
+
+        img = cv2.resize(new_img, (input_res, input_res))
     else:
         if bbox_file is not None:
             center, scale = bbox_from_json(bbox_file)
         elif openpose_file is not None:
             center, scale = bbox_from_openpose(openpose_file)
-    img = crop(img, center, scale, (input_res, input_res))
+        img = crop(img, center, scale, (input_res, input_res))
     img = img.astype(np.float32) / 255.
     img = torch.from_numpy(img).permute(2,0,1)
     norm_img = normalize_img(img.clone())[None]
     return img, norm_img
 
-if __name__ == '__main__':
-    args = parser.parse_args()
+def run_demo(model, smpl, renderer, img_filepath, device, output_dir, bbox_file=None, openpose_file=None):
     
+    img, norm_img = process_image(img_filepath, bbox_file, openpose_file, input_res=constants.IMG_RES)
+    with torch.no_grad():
+        pred_rotmat, pred_betas, pred_camera = model(norm_img.to(device))
+        pred_output = smpl(betas=pred_betas, body_pose=pred_rotmat[:,1:], global_orient=pred_rotmat[:,0].unsqueeze(1), pose2rot=False)
+        pred_vertices = pred_output.vertices
+        
+    # Calculate camera parameters for rendering
+    camera_translation = torch.stack([pred_camera[:,1], pred_camera[:,2], 2*constants.FOCAL_LENGTH/(constants.IMG_RES * pred_camera[:,0] +1e-9)],dim=-1)
+    camera_translation = camera_translation[0].cpu().numpy()
+    pred_vertices = pred_vertices[0].cpu().numpy()
+    img = img.permute(1,2,0).cpu().numpy()
+
+    # print('begin rendering')
+    # Render parametric shape
+    img_shape = renderer(pred_vertices, camera_translation, img, True)
+    
+    # print('begin rendering side')
+    # Render side views
+    aroundy = cv2.Rodrigues(np.array([0, np.radians(90.), 0]))[0]
+    center = pred_vertices.mean(axis=0)
+    rot_vertices = np.dot((pred_vertices - center), aroundy) + center
+    
+    # Render non-parametric shape
+    img_shape_side = renderer(rot_vertices, camera_translation, np.ones_like(img))
+
+
+    img_name_prefix = os.path.basename(img_filepath).split('.')[0]
+    # Save reconstructions
+    shape_filepath = os.path.join(output_dir, img_name_prefix + '_shape.jpg') 
+    # print('shape_filepath: ', shape_filepath)
+    cv2.imwrite(shape_filepath, 255 * img_shape[:,:,::-1])
+
+    shape_side_filepath = os.path.join(output_dir, img_name_prefix + '_shape_side.jpg')
+    # print('shape_side_filepath: ', shape_side_filepath)
+    cv2.imwrite(shape_side_filepath, 255 * img_shape_side[:,:,::-1])
+
+def main(args):
+    output_dir = args.outdir
+    os.makedirs(output_dir, exist_ok=True)
+    # args.checkpoint = r'C:\Users\hongr\Documents\GMU_research\computerVersion\hand_modeling\VIBE\data\vibe_data\spin_model_checkpoint.pth.tar'
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
     # Load pretrained model
@@ -116,32 +160,32 @@ if __name__ == '__main__':
 
 
     # Preprocess input image and generate predictions
-    img, norm_img = process_image(args.img, args.bbox, args.openpose, input_res=constants.IMG_RES)
-    with torch.no_grad():
-        pred_rotmat, pred_betas, pred_camera = model(norm_img.to(device))
-        pred_output = smpl(betas=pred_betas, body_pose=pred_rotmat[:,1:], global_orient=pred_rotmat[:,0].unsqueeze(1), pose2rot=False)
-        pred_vertices = pred_output.vertices
-        
-    # Calculate camera parameters for rendering
-    camera_translation = torch.stack([pred_camera[:,1], pred_camera[:,2], 2*constants.FOCAL_LENGTH/(constants.IMG_RES * pred_camera[:,0] +1e-9)],dim=-1)
-    camera_translation = camera_translation[0].cpu().numpy()
-    pred_vertices = pred_vertices[0].cpu().numpy()
-    img = img.permute(1,2,0).cpu().numpy()
+    img_filepath = args.img
+    bbox_file = args.bbox
+    openpose_file = args.openpose
+    input_dir = args.inputdir
+    if input_dir is not None:
+        img_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        for img_file in img_files:
+            print('Processing: ', img_file)
+            run_demo(model, smpl, renderer, img_file, device, output_dir, bbox_file, openpose_file)
+    elif img_filepath is not None:
+        run_demo(model, smpl, renderer, img_filepath, device, output_dir, bbox_file, openpose_file)
+    else:
+        print('No input image provided. Please provide either --img or --inputdir argument.')
 
-    
-    # Render parametric shape
-    img_shape = renderer(pred_vertices, camera_translation, img)
-    
-    # Render side views
-    aroundy = cv2.Rodrigues(np.array([0, np.radians(90.), 0]))[0]
-    center = pred_vertices.mean(axis=0)
-    rot_vertices = np.dot((pred_vertices - center), aroundy) + center
-    
-    # Render non-parametric shape
-    img_shape_side = renderer(rot_vertices, camera_translation, np.ones_like(img))
 
-    outfile = args.img.split('.')[0] if args.outfile is None else args.outfile
+if __name__ == '__main__':
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint', default= 'data/model_checkpoint.pt' , help='Path to pretrained checkpoint')
+    parser.add_argument('--img', type=str, help='Path to input image')
+    parser.add_argument('--bbox', type=str, default=None, help='Path to .json file containing bounding box coordinates')
+    parser.add_argument('--openpose', type=str, default=None, help='Path to .json containing openpose detections')
+    parser.add_argument('--outfile', type=str, default=None, help='Filename of output images. If not set use input filename.')
+    parser.add_argument('--outdir', type=str, default='output', help='output directory for the results')
+    parser.add_argument('--inputdir', type=str, default=None, help='input directory for the images')
 
-    # Save reconstructions
-    cv2.imwrite(outfile + '_shape.png', 255 * img_shape[:,:,::-1])
-    cv2.imwrite(outfile + '_shape_side.png', 255 * img_shape_side[:,:,::-1])
+    args = parser.parse_args()
+    main(args)
+    

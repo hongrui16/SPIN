@@ -1,5 +1,5 @@
 import os
-os.environ['PYOPENGL_PLATFORM'] = 'osmesa'
+# os.environ['PYOPENGL_PLATFORM'] = 'osmesa'
 import torch
 from torchvision.utils import make_grid
 import numpy as np
@@ -32,11 +32,11 @@ class Renderer:
         rend_imgs = make_grid(rend_imgs, nrow=2)
         return rend_imgs
 
-    def __call__(self, vertices, camera_translation, image):
+    def __call__(self, vertices, camera_translation, image, assemble_color_image=False):
         material = pyrender.MetallicRoughnessMaterial(
             metallicFactor=0.2,
             alphaMode='OPAQUE',
-            baseColorFactor=(0.8, 0.3, 0.3, 1.0))
+            baseColorFactor=(1.0, 1.0, 0.0, 1.0))  # RGB为艳黄色，A(Alpha)为1.0表示不透明
 
         camera_translation[0] *= -1.
 
@@ -71,6 +71,19 @@ class Renderer:
         color, rend_depth = self.renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
         valid_mask = (rend_depth > 0)[:,:,None]
-        output_img = (color[:, :, :3] * valid_mask +
-                  (1 - valid_mask) * image)
+        if not assemble_color_image:    
+            output_img = (color[:, :, :3] * valid_mask +
+                    (1 - valid_mask) * image)
+        else:
+            # 设置 color 和 image 的 alpha 值
+            alpha_color = 0.5
+            alpha_image = 0.5
+
+            color_rgb = color[:, :, :3]
+            # 对于 valid_mask 部分：计算加权混合
+            output_img = valid_mask * (color_rgb * alpha_color + image * alpha_image)
+
+            # 对于非 valid_mask 部分：使用原始背景图像
+            output_img += (1 - valid_mask) * image
+
         return output_img

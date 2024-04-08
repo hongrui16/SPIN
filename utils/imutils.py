@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import scipy.misc
 import cv2
+from PIL import Image
 
 import constants
 
@@ -70,14 +71,28 @@ def crop(img, center, scale, res, rot=0):
     old_y = max(0, ul[1]), min(len(img), br[1])
     new_img[new_y[0]:new_y[1], new_x[0]:new_x[1]] = img[old_y[0]:old_y[1], 
                                                         old_x[0]:old_x[1]]
+    img = Image.fromarray(new_img)
 
-    if not rot == 0:
-        # Remove padding
-        new_img = scipy.misc.imrotate(new_img, rot)
-        new_img = new_img[pad:-pad, pad:-pad]
+    # if not rot == 0:
+    #     # Remove padding
+    #     new_img = scipy.misc.imrotate(new_img, rot)
+    #     new_img = new_img[pad:-pad, pad:-pad]
 
-    new_img = scipy.misc.imresize(new_img, res)
-    return new_img
+    # new_img = scipy.misc.imresize(new_img, res)
+    if rot != 0:
+        # 旋转图像
+        img = img.rotate(rot, expand=True)  # expand=True 表示扩展图像使旋转后的图像不会被裁剪
+        # 裁剪图像以移除填充
+        img = img.crop((pad, pad, img.width - pad, img.height - pad))
+
+    # 调整图像大小
+    resized_img = img.resize(res)
+
+    # 如果需要，将 PIL 图像转换回 numpy 数组
+    new_img_array = np.array(resized_img)
+
+
+    return new_img_array
 
 def uncrop(img, center, scale, orig_shape, rot=0, is_rgb=True):
     """'Undo' the image cropping/resizing.
@@ -101,7 +116,13 @@ def uncrop(img, center, scale, orig_shape, rot=0, is_rgb=True):
     # Range to sample from original image
     old_x = max(0, ul[0]), min(orig_shape[1], br[0])
     old_y = max(0, ul[1]), min(orig_shape[0], br[1])
-    img = scipy.misc.imresize(img, crop_shape, interp='nearest')
+    # img = scipy.misc.imresize(img, crop_shape, interp='nearest')
+    resized_img = img.resize(crop_shape)
+
+    # 如果需要，将 PIL 图像转换回 numpy 数组
+    img = np.array(resized_img)
+
+
     new_img[old_y[0]:old_y[1], old_x[0]:old_x[1]] = img[new_y[0]:new_y[1], new_x[0]:new_x[1]]
     return new_img
 
